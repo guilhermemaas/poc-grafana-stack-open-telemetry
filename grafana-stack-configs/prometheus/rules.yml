@@ -1,0 +1,11 @@
+groups:
+  - name: posicao
+    rules:
+      - alert: PosicaoAltaDuracaoRequests
+        expr: histogram_quantile(0.9, rate(flask_http_request_duration_seconds_bucket{job="posicoes"}[5m])) > 0.5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Tempo de resposta alto /posicoes"
+          description: "90% das requests estão demorando mais de 500ms"

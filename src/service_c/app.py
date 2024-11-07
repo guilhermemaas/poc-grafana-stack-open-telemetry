@@ -1,0 +1,91 @@
+#Flask
+from flask import Flask, jsonify, render_template, abort, json, request
+from prometheus_flask_exporter import PrometheusMetrics
+#Otel
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+#from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter #Exporter dos traces com gRCP
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.flask import FlaskInstrumentor
+from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
+#Logs
+from loguru import logger
+#Outros
+import os
+import requests
+import time
+
+#Parâmetros das variáveis de ambiente
+LOG_DIR = os.getenv('LOG_DIR')
+OTEL_TRACE_URL = os.getenv('OTEL_TRACE_URL')
+OTEL_SERVICE_NAME = os.getenv('OTEL_SERVICE_NAME')
+
+#Loguru
+logger.remove()
+logger.add(
+    f"{LOG_DIR}/{OTEL_SERVICE_NAME}.log",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {name}:{function}:{line} - {message}",
+    serialize=True,
+    rotation="120 minutes",
+    retention=3
+)
+
+#Configura para qualquer requests com a lib requests ser instrumentado pelo OpenTelemetry:
+RequestsInstrumentor().instrument()
+
+# Configure tracing
+resource = Resource(attributes={
+    SERVICE_NAME: OTEL_SERVICE_NAME
+})
+trace.set_tracer_provider(TracerProvider(resource=resource))
+tracer = trace.get_tracer(__name__)
+
+# Configure the OTLP exporter
+otlp_exporter = OTLPSpanExporter(
+    endpoint=f'{OTEL_TRACE_URL}'
+)
+
+# Adiciona processor de span
+trace.get_tracer_provider().add_span_processor(
+    BatchSpanProcessor(otlp_exporter)
+)
+
+app = Flask(__name__)
+
+# Instrumenta o Flask
+FlaskInstrumentor().instrument_app(app)
+
+#Gera endpoint /metrcis Prometheus
+metrics = PrometheusMetrics(app)
+
+def get_trace_info(span):
+    """
+    Função para buscar o contexto atual (TracID e SpanID).
+    """
+    context = span.get_span_context()
+    trace_id = format(context.trace_id, '032x')
+    span_id = format(context.span_id, '016x')
+    return trace_id, span_id
+
+
+@app.route('/lincros', methods = ['GET'])
+def lincros():
+    """
+    Request: htts://lincros.com
+    """
+
+    time.sleep(5)
+
+    response = requests.get('https://lincros.com')
+
+    logger.info("Chamando lincros.com", extra={"trace_id": format(trace.get_current_span().context.trace_id, '032x'), 
+                                        "span_id": format(trace.get_current_span().context.span_id, '016x')})
+
+    return 'Spans!'
+
+
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5007)

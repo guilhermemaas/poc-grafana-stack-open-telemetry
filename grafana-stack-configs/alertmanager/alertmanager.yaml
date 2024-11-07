@@ -1,0 +1,20 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'opsgenie'
+  routes:
+    - match:
+        severity: 'critical'
+      receiver: 'opsgenie'  
+
+receivers:
+  - name: 'opsgenie'
+    opsgenie_configs:
+    - api_key: 'f17db948-812b-4cce-83af-c9816cf5ac85'
+      #api_url: 'https://api.opsgenie.com/v2/alerts'
+      send_resolved: true

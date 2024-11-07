@@ -1,0 +1,306 @@
+version: '3.8'
+services:
+
+#---------------------------------------------------------------------------------------
+# Serviço de exemplo para geração de traces, logs e métricas
+#---------------------------------------------------------------------------------------
+  service_a:
+    build: 
+      context: ./src/service_a
+      dockerfile: Dockerfile
+    volumes:
+      - log_volume:/log
+    ports:
+      - "5000:5000"
+    environment:
+      - SERVICE_B_URL=http://service_b:5000
+      - LOG_DIR=/log
+      - OTEL_EXPORTER=otel
+      - OTEL_TRACE_URL=http://grafana-agent:4318/v1/traces
+      - OTEL_SERVICE_NAME=service_a
+           
+  service_b:
+    build: 
+      context: ./src/service_b
+      dockerfile: Dockerfile
+    volumes:
+      - log_volume:/log
+    ports:
+      - "5001:5000"
+    environment:
+      - SERVICE_C_URL=http://service_c:5000
+      - LOG_DIR=/log
+      - OTEL_EXPORTER=otel
+      - OTEL_TRACE_URL=http://grafana-agent:4318/v1/traces
+      - OTEL_SERVICE_NAME=service_b
+    depends_on:
+      - service_a
+
+  service_c:
+    build: 
+      context: ./src/service_c
+      dockerfile: Dockerfile
+    volumes:
+      - log_volume:/log
+    ports:
+      - "5002:5000"
+    environment:
+      - LOG_DIR=/log
+      - OTEL_EXPORTER=otel
+      - OTEL_TRACE_URL=http://grafana-agent:4318/v1/traces
+      - OTEL_SERVICE_NAME=service_c
+    depends_on:
+      - service_b
+
+  rabbitmq:
+    image: "rabbitmq:3-management"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  mongo:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  posicoes:
+    build: 
+      context: ./src/posicoes
+      dockerfile: Dockerfile
+    volumes:
+      - log_volume:/log
+    ports:
+      - "5005:5000"
+    environment:
+      - LOG_DIR=/log
+      - OTEL_TRACE_URL=http://grafana-agent:4318/v1/traces
+      - OTEL_SERVICE_NAME=posicoes
+      - RABBIT_HOST=rabbitmq
+      - MONGO_HOST=mongo
+    depends_on:
+      - mongo
+      - rabbitmq
+
+  pyroscope-app:
+    build: 
+      context: ./src/pyroscope-app
+      dockerfile: Dockerfile
+    ports:
+      - "5006:5000"
+    environment:
+      - PYROSCOPE_ADDRESS=pyroscope:4040
+
+  iss:
+    build: 
+      context: ./src/iss
+      dockerfile: Dockerfile
+    ports:
+      - "8899:8899"   
+
+#---------------------------------------------------------------------------------------
+#Prometheus, Alertmanager e Node Exporter
+#---------------------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.enable-remote-write-receiver'    
+    volumes:
+      - ./grafana-stack-configs/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+  alertmanager:
+    image: prom/alertmanager:latest
+    volumes:
+      - ./grafana-stack-configs/alertmanager/alertmanager.yaml:/etc/alertmanager/alertmanager.yaml
+    ports:
+      - "9093:9093"
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yaml'
+      - '--storage.path=/alertmanager'
+    depends_on:
+      - prometheus
+  nodeexporter:
+    image: prom/node-exporter:latest
+    ports:
+      - "9100:9100"
+    volumes:
+      - "/proc:/host/proc:ro"
+      - "/sys:/host/sys:ro"
+      - "/:/rootfs:ro"
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points'
+      - '^/(sys|proc|dev|host|etc)($$|/)'       
+
+#---------------------------------------------------------------------------------------
+#S3 Storage com Minio
+#---------------------------------------------------------------------------------------
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server ~ --address ':9000' --console-address ':9001'
+  #Esse container apenas executa a criação do bucket se não existir      
+  minio-create-bucket: 
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc config host add myminio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb --ignore-existing myminio/tempo;
+      /usr/bin/mc policy set public myminio/tempo;
+      /usr/bin/mc mb --ignore-existing myminio/loki;
+      /usr/bin/mc policy set public myminio/loki;
+      /usr/bin/mc mb --ignore-existing myminio/prometheus;
+      /usr/bin/mc policy set public myminio/prometheus;      
+      exit 0;
+      "
+
+#---------------------------------------------------------------------------------------
+# Grafana Stack:
+#---------------------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:latest
+    command: -config.file=/etc/loki/config.yaml
+    volumes:
+      - ./grafana-stack-configs/grafana-loki/config.yaml:/etc/loki/config.yaml
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    depends_on:
+      - minio
+      - minio-create-bucket
+
+  tempo:
+    image: grafana/tempo:latest
+    command: [ "-config.file=/etc/config.yaml" ]
+    volumes:
+      - ./grafana-stack-configs/grafana-tempo/config.yaml:/etc/config.yaml
+      - tempo_data:/var/tempo
+      - tempo_metrics_data:/var/tempo_metrics
+    ports:
+      - "3200:3200"
+      - "4318:4318"
+      - "4317:4317"
+    depends_on:
+      - minio
+      - minio-create-bucket
+
+  grafana-agent:
+    image: grafana/agent:latest
+    volumes:
+      - ./grafana-stack-configs/grafana-agent/config.yaml:/etc/grafana-agent/config.yaml
+      - log_volume:/log
+    ports:
+      - "4327:4317"
+      - "4328:4318"
+      - "12345:12345"
+      - "4242:4242"
+    command: ['-config.file=/etc/grafana-agent/config.yaml']
+    depends_on:
+      - loki
+      - tempo
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./grafana-stack-configs/grafana:/etc/grafana
+      - ./grafana-stack-configs/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana-stack-configs/grafana/dashboards-provisioning:/etc/grafana/provisioning/dashboards
+      - ./grafana-stack-configs/grafana/dashboards:/var/lib/grafana/dashboards      
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+  pyroscope:
+    image: pyroscope/pyroscope:latest
+    command: server
+    restart: unless-stopped
+    ports:
+      - "4040:4040"
+    volumes:
+      - pyroscope_data:/data      
+
+#---------------------------------------------------------------------------------------
+#Prometheus + Thanos
+#---------------------------------------------------------------------------------------
+#
+#  prometheus-thanos:
+#    image: prom/prometheus:latest
+#    volumes:
+#      - ./grafana-stack-configs/prometheus-thanos:/etc/prometheus
+#      - prometheus_thanos_data:/prometheus
+#    command:
+#      - "--config.file=/etc/prometheus/prometheus.yml"
+#      - "--storage.tsdb.path=/prometheus"
+#      - "--storage.tsdb.min-block-duration=2h"
+#      - "--storage.tsdb.max-block-duration=2h"      
+#    ports:
+#      - "9095:9090"
+#
+#  thanos-sidecar:
+#    image: thanosio/thanos:main-2024-03-24-93c79b6
+#    command:
+#      - "sidecar"
+#      - "--prometheus.url=http://prometheus-thanos:9090"
+#      - "--tsdb.path=/prometheus"
+#      - "--objstore.config-file=/etc/thanos/minio-bucket.yml"
+#    volumes:
+#      - ./grafana-stack-configs/prometheus-thanos/minio-bucket.yaml:/etc/thanos/minio-bucket.yml
+#      - prometheus_thanos_data:/prometheus
+#    depends_on:
+#      - prometheus-thanos
+#      - minio
+#
+#  thanos-store:
+#    image: thanosio/thanos:main-2024-03-24-93c79b6
+#    command:
+#      - "store"
+#      - "--data-dir=/thanos-store"
+#      - "--objstore.config-file=/etc/thanos/minio-bucket.yml"
+#    volumes:
+#      - thanos_store:/thanos-store
+#      - ./grafana-stack-configs/prometheus-thanos/minio-bucket.yaml:/etc/thanos/minio-bucket.yml
+#    ports:
+#      - "10901:10901"
+#    depends_on:
+#      - prometheus-thanos
+#      - thanos-sidecar
+#      - minio
+#
+#  thanos-querier:
+#    image: thanosio/thanos:main-2024-03-24-93c79b6
+#    command:
+#      - "query"
+#      - "--http-address=0.0.0.0:9090"
+#      - "--query.replica-label=replica"
+#      - "--store=thanos-store:10901"
+#    ports:
+#      - "9096:9090"
+#    depends_on:
+#      - thanos-store
+#      - thanos-sidecar     
+
+volumes:
+  prometheus_data:
+  #prometheus_thanos_data:
+  #thanos_store:
+  grafana_data:
+  loki_data:
+  tempo_data:
+  tempo_metrics_data:
+  log_volume:
+  postgres_data:
+  rabbitmq_data:
+  mongo_data:
+  pyroscope_data:

@@ -1,0 +1,3 @@
+flask
+pyroscope-io
+gunicorn==21.2.0
