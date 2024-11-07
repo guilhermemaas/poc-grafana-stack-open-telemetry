@@ -1,7 +1,7 @@
 # Como rodar localmente:
 
 ### Clonar o repositório:
-`git clone git@ssh.dev.azure.com:v3/lincros-sa/DevOps%20and%20SRE/poc-grafana-stack`
+`git clone https://github.com/guilhermemaas/poc-grafana-stack-open-telemetry.git`
 
 ### Iniciar os containers:
 `docker compose -f docker-compose.yaml up --build -d`
