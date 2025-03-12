@@ -15,6 +15,5 @@ route:
 receivers:
   - name: 'opsgenie'
     opsgenie_configs:
-    - api_key: 'f17db948-812b-4cce-83af-c9816cf5ac85'
-      #api_url: 'https://api.opsgenie.com/v2/alerts'
+    - api_key:
       send_resolved: true
